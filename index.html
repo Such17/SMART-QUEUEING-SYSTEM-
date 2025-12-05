@@ -1,0 +1,242 @@
+<!-- templates/index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Mart Counter Routing </title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Bootstrap CDN -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#0b0f12; color: #e9eef6; padding: 16px; }
+    .card { background:#13171b; border: 1px solid #1f2a36; }
+    /* user-requested white texts */
+    .card h5 { color: #ffffff !important; }            /* headings */
+    #pendingQueue, #pendingQueue .queue-item { color: #ffffff !important; } /* pending trolley lines */
+    .big-screen { border: 3px solid #0d6efd; background:#07101a; padding: 18px; text-align:center; border-radius:8px; color:#ffffff !important; } /* display screen text white */
+    .small-muted { color:#9aa3b2; font-size:0.9rem; }
+    .queue-item { border-bottom:1px dashed #23272b; padding:6px 0; }
+    .counter-grid { display:flex; flex-wrap:wrap; gap:10px; }
+  </style>
+</head>
+<body>
+  <div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2>Mart Counter Routing (Flask)</h2>
+      <div>
+        <button id="btnAddRandom" class="btn btn-secondary me-2">Add Random Trolley</button>
+        <button id="btnAssign" class="btn btn-primary">Assign Next</button>
+      </div>
+    </div>
+
+    <div class="row mb-3">
+      <div class="col-md-4">
+        <div class="card p-3">
+          <h5>Create trolley manually</h5>
+          <label class="form-label small-muted">Trolley ID (optional)</label>
+          <input id="inputTid" class="form-control mb-2" placeholder="auto" type="number">
+          <label class="form-label small-muted">Items (one per line: Category:qty)</label>
+          <textarea id="textareaItems" class="form-control" rows="6">Groceries:3
+Produce:2</textarea>
+          <div class="mt-2">
+            <button id="btnAddManual" class="btn btn-success">Add Trolley</button>
+            <div id="manualFeedback" class="small-muted mt-2"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-4">
+        <div class="card p-3">
+          <h5>Pending queue</h5>
+          <div id="pendingQueue" style="min-height:120px;"></div>
+        </div>
+      </div>
+
+      <div class="col-md-4">
+        <div class="card p-3">
+          <h5>Big Screen</h5>
+          <div id="bigScreen" class="big-screen">No assignment yet</div>
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="toggleAuto">
+            <label class="form-check-label small-muted" for="toggleAuto">Auto-process (client ticks server every 1s)</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <hr style="border-color:#1f2a36">
+
+    <h5 class="mb-2">Counters</h5>
+    <div id="counters" class="counter-grid">
+      <!-- counters injected by JS -->
+    </div>
+
+    <div class="mt-4 small-muted">
+      <strong>Notes:</strong> Assign uses expected completion = (sum of remaining times in counter) + (service time for new trolley at that counter).
+    </div>
+  </div>
+
+<script>
+// @ts-ignore 
+const NUM_COUNTERS = {{ num_counters }};
+// @ts-ignore
+const PROFILES = {{ profiles | tojson | safe }};
+
+async function fetchState(){
+  const res = await fetch('/state');
+  return await res.json();
+}
+
+function formatItems(items){
+  return items.map(it => `${it.category} x${it.qty}`).join(', ');
+}
+
+function renderState(s){
+  // pending queue
+  const pendingDiv = document.getElementById('pendingQueue');
+  pendingDiv.innerHTML = '';
+  if(!s.pending || s.pending.length === 0){
+    pendingDiv.innerHTML = '<div class="small-muted">No pending trolleys</div>';
+  } else {
+    s.pending.forEach(t => {
+      const d = document.createElement('div');
+      d.className = 'queue-item';
+      d.innerHTML = `<strong>Trolley ${t.id}</strong> — ${formatItems(t.items)}`;
+      pendingDiv.appendChild(d);
+    });
+  }
+
+  // big screen
+  const bs = document.getElementById('bigScreen');
+  if(s.last_assignment && s.last_assignment.trolley_id){
+    const a = s.last_assignment;
+    const mm = Math.floor(a.est_finish_seconds/60);
+    const ss = Math.floor(a.est_finish_seconds % 60);
+    bs.innerHTML = `<div style="font-size:28px">Trolley ${a.trolley_id}</div>
+                    <div style="font-size:14px; opacity:.8">Please go to</div>
+                    <div style="font-size:34px; color:#00ff99; margin-top:6px">Counter ${a.counter_id}</div>
+                    <div style="font-size:12px; opacity:.8; margin-top:6px">Est finish in ${mm}m ${ss}s</div>`;
+  } else if(s.last_completed && s.last_completed.trolley_id){
+    const c = s.last_completed;
+    bs.innerHTML = `<div style="font-size:20px">Trolley ${c.trolley_id} finished at Counter ${c.counter_id}</div>`;
+  } else {
+    bs.textContent = 'No assignment yet';
+  }
+
+  // counters
+  const container = document.getElementById('counters');
+  container.innerHTML = '';
+  for(let i=1;i<=NUM_COUNTERS;i++){
+    const id = String(i);
+    const q = (s.counters && s.counters[id]) ? s.counters[id] : [];
+    const profile = PROFILES.find(p => String(p.id) === id) || {name: `Counter ${id}`, spec: 'General'};
+    const isPaused = s.paused && s.paused[id];
+
+    const card = document.createElement('div');
+    card.className = 'card p-3';
+    card.style.width = '18rem';
+    card.style.background = '#13171b';
+    card.style.color = '#e9eef6';
+    card.style.border = '1px solid #1f2a36';
+
+    let headHtml = 'Idle';
+    let progressPct = 0;
+    if(q.length > 0){
+      const head = q[0];
+      const rem = (head.remaining_seconds !== undefined) ? head.remaining_seconds : head.service_time;
+      const st = (head.service_time !== undefined) ? head.service_time : rem;
+      const mm = Math.floor(rem/60), ss = Math.floor(rem%60);
+      headHtml = `T${head.id} — ${mm}m ${ss}s remaining`;
+      progressPct = st > 0 ? Math.round((1 - rem/st) * 100) : 0;
+      if(progressPct < 0) progressPct = 0;
+      if(progressPct > 100) progressPct = 100;
+    }
+
+    const pauseLabel = isPaused ? 'Resume' : 'Pause';
+    const pauseClass = isPaused ? 'btn-success' : 'btn-outline-light';
+
+    card.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center">
+        <div><strong>${profile.name}</strong><div class="small-muted">${profile.spec}</div></div>
+      </div>
+      <div style="margin-top:8px">${headHtml}</div>
+      <div class="progress mt-2" style="height:10px">
+        <div class="progress-bar" role="progressbar" style="width:${progressPct}%"></div>
+      </div>
+      <div style="margin-top:8px; font-weight:600">Queue: ${q.length}</div>
+      <div style="margin-top:8px; display:flex; gap:8px">
+        <button class="btn btn-warning btn-sm" data-counter="${i}">Finish Head</button>
+        <button class="btn ${pauseClass} btn-sm" data-pause="${i}">${pauseLabel}</button>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+
+  // attach finish handlers
+  document.querySelectorAll('button[data-counter]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      const cid = btn.getAttribute('data-counter');
+      await fetch(`/finish/${cid}`, { method:'POST' });
+      refresh();
+    };
+  });
+
+  // attach pause handlers
+  document.querySelectorAll('button[data-pause]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      const cid = btn.getAttribute('data-pause');
+      await fetch(`/toggle_pause/${cid}`, { method:'POST' });
+      refresh();
+    };
+  });
+}
+
+async function refresh(){
+  const s = await fetchState();
+  renderState(s);
+}
+
+document.getElementById('btnAddRandom').addEventListener('click', async ()=>{
+  await fetch('/add_random', { method:'POST' });
+  refresh();
+});
+
+document.getElementById('btnAddManual').addEventListener('click', async ()=>{
+  const tid = document.getElementById('inputTid').value;
+  const items = document.getElementById('textareaItems').value;
+  const res = await fetch('/add_manual', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({tid: tid, items: items})
+  });
+  const jr = await res.json();
+  document.getElementById('manualFeedback').textContent = jr.message || '';
+  refresh();
+});
+
+document.getElementById('btnAssign').addEventListener('click', async ()=>{
+  await fetch('/assign_next', { method:'POST' });
+  refresh();
+});
+
+// Auto-process toggle: when on, call /tick every 1s
+let autoInterval = null;
+document.getElementById('toggleAuto').addEventListener('change', (ev)=>{
+  if(ev.target.checked){
+    if(autoInterval) clearInterval(autoInterval);
+    autoInterval = setInterval(async ()=>{
+      await fetch('/tick', { method:'POST' });
+      refresh();
+    }, 1000);
+  } else {
+    if(autoInterval) clearInterval(autoInterval);
+    autoInterval = null;
+  }
+});
+
+// initial load
+refresh();
+</script>
+
+</body>
+</html>
